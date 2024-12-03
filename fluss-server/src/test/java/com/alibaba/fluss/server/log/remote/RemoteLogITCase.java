@@ -61,125 +61,46 @@ public class RemoteLogITCase {
                     .setClusterConf(initConfig())
                     .build();
 
-    @Test
-    void testDeleteRemoteLog() throws Exception {
+    private TableBucket setupTestEnvironment() throws Exception {
         long tableId =
                 createTable(
                         FLUSS_CLUSTER_EXTENSION,
                         DATA1_TABLE_PATH,
                         DATA1_TABLE_INFO.getTableDescriptor());
         TableBucket tb = new TableBucket(tableId, 0);
-
         FLUSS_CLUSTER_EXTENSION.waitUtilAllReplicaReady(tb);
-        int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
-        TabletServerGateway leaderGateWay =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
-        // produce many records to trigger remote log copy.
-        for (int i = 0; i < 10; i++) {
-            assertProduceLogResponse(
-                    leaderGateWay
-                            .produceLog(
-                                    newProduceLogRequest(
-                                            tableId, 0, 1, genMemoryLogRecordsByObject(DATA1)))
-                            .get(),
-                    0,
-                    i * 10L);
-        }
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(new TableBucket(tableId, 0));
-
-        // get leader.
-        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
-        FsPath fsPath =
-                FlussPaths.remoteLogTabletDir(
-                        tabletServer.getReplicaManager().getRemoteLogManager().remoteLogDir(),
-                        PhysicalTablePath.of(DATA1_TABLE_PATH),
-                        tb);
-        FileSystem fileSystem = fsPath.getFileSystem();
-        assertThat(fileSystem.exists(fsPath)).isTrue();
-        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(1);
-
-        CoordinatorGateway coordinatorGateway = FLUSS_CLUSTER_EXTENSION.newCoordinatorClient();
-        coordinatorGateway
-                .dropTable(
-                        newDropTableRequest(
-                                DATA1_TABLE_PATH.getDatabaseName(),
-                                DATA1_TABLE_PATH.getTableName(),
-                                true))
-                .get();
-        retry(Duration.ofMinutes(2), () -> assertThat(fileSystem.exists(fsPath)).isFalse());
+        return tb;
     }
 
-    @Test
-    void testFollowerFetchAlreadyMoveToRemoteLog() throws Exception {
-        long tableId =
-                createTable(
-                        FLUSS_CLUSTER_EXTENSION,
-                        DATA1_TABLE_PATH,
-                        DATA1_TABLE_INFO.getTableDescriptor());
-        TableBucket tb = new TableBucket(tableId, 0);
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilAllReplicaReady(tb);
-        int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
-        int follower;
-        for (int i = 0; true; i++) {
-            if (i != leader) {
-                follower = i;
-                break;
-            }
-        }
-        // kill follower, and restart after some segments in leader has been copied to remote.
-        FLUSS_CLUSTER_EXTENSION.stopTabletServer(follower);
-
-        TabletServerGateway leaderGateWay =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
-        // produce many records to trigger remote log copy.
-        for (int i = 0; i < 10; i++) {
+    private void produceTestRecords(TabletServerGateway leaderGateWay, TableBucket tb, int count)
+            throws Exception {
+        for (int i = 0; i < count; i++) {
             assertProduceLogResponse(
                     leaderGateWay
                             .produceLog(
                                     newProduceLogRequest(
-                                            tableId, 0, 1, genMemoryLogRecordsByObject(DATA1)))
+                                            tb.getTableId(),
+                                            0,
+                                            1,
+                                            genMemoryLogRecordsByObject(DATA1)))
                             .get(),
                     0,
                     i * 10L);
         }
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilReplicaShrinkFromIsr(tb, follower);
-        FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
-
-        // restart follower
-        FLUSS_CLUSTER_EXTENSION.startTabletServer(follower);
-        FLUSS_CLUSTER_EXTENSION.waitUtilReplicaExpandToIsr(tb, follower);
     }
 
     @Test
     void testCreateAndUploadRemoteLog() throws Exception {
-        long tableId =
-                createTable(
-                        FLUSS_CLUSTER_EXTENSION,
-                        DATA1_TABLE_PATH,
-                        DATA1_TABLE_INFO.getTableDescriptor());
-        TableBucket tb = new TableBucket(tableId, 0);
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilAllReplicaReady(tb);
+        TableBucket tb = setupTestEnvironment();
         int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
         TabletServerGateway leaderGateWay =
                 FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
 
-        for (int i = 0; i < 5; i++) {
-            assertProduceLogResponse(
-                    leaderGateWay
-                            .produceLog(
-                                    newProduceLogRequest(
-                                            tableId, 0, 1, genMemoryLogRecordsByObject(DATA1)))
-                            .get(),
-                    0,
-                    i * 10L);
-        }
-
+        // Produce records and wait for remote copy
+        produceTestRecords(leaderGateWay, tb, 5);
         FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
 
+        // Verify remote files
         TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
         FsPath fsPath =
                 FlussPaths.remoteLogTabletDir(
@@ -194,40 +115,24 @@ public class RemoteLogITCase {
 
     @Test
     void testDownloadRemoteLog() throws Exception {
-        long tableId =
-                createTable(
-                        FLUSS_CLUSTER_EXTENSION,
-                        DATA1_TABLE_PATH,
-                        DATA1_TABLE_INFO.getTableDescriptor());
-        TableBucket tb = new TableBucket(tableId, 0);
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilAllReplicaReady(tb);
+        TableBucket tb = setupTestEnvironment();
         int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
         TabletServerGateway leaderGateWay =
                 FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
         TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
 
-        for (int i = 0; i < 10; i++) {
-            assertProduceLogResponse(
-                    leaderGateWay
-                            .produceLog(
-                                    newProduceLogRequest(
-                                            tableId, 0, 1, genMemoryLogRecordsByObject(DATA1)))
-                            .get(),
-                    0,
-                    i * 10L);
-        }
-
+        // Produce records and wait for remote copy
+        produceTestRecords(leaderGateWay, tb, 10);
         FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
 
         CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> future =
                 new CompletableFuture<>();
-
         tabletServer
                 .getReplicaManager()
                 .fetchLogRecords(
                         new FetchParams(-1, Integer.MAX_VALUE),
-                        Collections.singletonMap(tb, new FetchData(tableId, 0L, 1024 * 1024)),
+                        Collections.singletonMap(
+                                tb, new FetchData(tb.getTableId(), 0L, 1024 * 1024)),
                         future::complete);
 
         Map<TableBucket, FetchLogResultForBucket> result = future.get();
@@ -240,43 +145,84 @@ public class RemoteLogITCase {
     }
 
     @Test
-    void testRemoteLogMetadataUpdate() throws Exception {
-        long tableId =
-                createTable(
-                        FLUSS_CLUSTER_EXTENSION,
-                        DATA1_TABLE_PATH,
-                        DATA1_TABLE_INFO.getTableDescriptor());
-        TableBucket tb = new TableBucket(tableId, 0);
-
-        FLUSS_CLUSTER_EXTENSION.waitUtilAllReplicaReady(tb);
+    void testDeleteRemoteLog() throws Exception {
+        TableBucket tb = setupTestEnvironment();
         int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
         TabletServerGateway leaderGateWay =
                 FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
 
-        for (int i = 0; i < 5; i++) {
-            assertProduceLogResponse(
-                    leaderGateWay
-                            .produceLog(
-                                    newProduceLogRequest(
-                                            tableId, 0, 1, genMemoryLogRecordsByObject(DATA1)))
-                            .get(),
-                    0,
-                    i * 10L);
-        }
-
+        // Produce records and wait for remote copy
+        produceTestRecords(leaderGateWay, tb, 10);
         FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
 
+        // Verify remote files exist
+        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
+        FsPath fsPath =
+                FlussPaths.remoteLogTabletDir(
+                        tabletServer.getReplicaManager().getRemoteLogManager().remoteLogDir(),
+                        PhysicalTablePath.of(DATA1_TABLE_PATH),
+                        tb);
+        FileSystem fileSystem = fsPath.getFileSystem();
+        assertThat(fileSystem.exists(fsPath)).isTrue();
+        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(1);
+
+        // Delete table and verify cleanup
+        CoordinatorGateway coordinatorGateway = FLUSS_CLUSTER_EXTENSION.newCoordinatorClient();
+        coordinatorGateway
+                .dropTable(
+                        newDropTableRequest(
+                                DATA1_TABLE_PATH.getDatabaseName(),
+                                DATA1_TABLE_PATH.getTableName(),
+                                true))
+                .get();
+        retry(Duration.ofMinutes(2), () -> assertThat(fileSystem.exists(fsPath)).isFalse());
+    }
+
+    @Test
+    void testFollowerFetchAlreadyMoveToRemoteLog() throws Exception {
+        TableBucket tb = setupTestEnvironment();
+        int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
+        int follower = leader == 0 ? 1 : 0;
+
+        // Stop follower
+        FLUSS_CLUSTER_EXTENSION.stopTabletServer(follower);
+
+        // Produce records and wait for remote copy
+        TabletServerGateway leaderGateWay =
+                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
+        produceTestRecords(leaderGateWay, tb, 10);
+
+        FLUSS_CLUSTER_EXTENSION.waitUtilReplicaShrinkFromIsr(tb, follower);
+        FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
+
+        // Restart follower and verify recovery
+        FLUSS_CLUSTER_EXTENSION.startTabletServer(follower);
+        FLUSS_CLUSTER_EXTENSION.waitUtilReplicaExpandToIsr(tb, follower);
+    }
+
+    @Test
+    void testRemoteLogMetadataUpdate() throws Exception {
+        TableBucket tb = setupTestEnvironment();
+        int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
+        TabletServerGateway leaderGateWay =
+                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
+
+        // Produce records and wait for remote copy
+        produceTestRecords(leaderGateWay, tb, 5);
+        FLUSS_CLUSTER_EXTENSION.waitUtilSomeLogSegmentsCopyToRemote(tb);
+
+        // Verify metadata
         TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
         RemoteLogManager remoteLogManager = tabletServer.getReplicaManager().getRemoteLogManager();
-
         RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
+
         assertThat(remoteLog.allRemoteLogSegments()).isNotEmpty();
         assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).isPresent();
 
+        // Verify manifest
         RemoteLogManifest manifest = remoteLog.currentManifest();
         assertThat(manifest.getRemoteLogSegmentList()).isNotEmpty();
-
         assertThat(manifest.getRemoteLogSegmentList())
                 .containsExactlyInAnyOrderElementsOf(remoteLog.allRemoteLogSegments());
     }
@@ -285,12 +231,8 @@ public class RemoteLogITCase {
         Configuration conf = new Configuration();
         conf.setInt(ConfigOptions.DEFAULT_BUCKET_NUMBER, 1);
         conf.setInt(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 3);
-        // set a shorter interval for testing purpose
         conf.set(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION, Duration.ofSeconds(1));
         conf.set(ConfigOptions.LOG_SEGMENT_FILE_SIZE, MemorySize.parse("1kb"));
-
-        // set a shorter max log time to allow replica shrink from isr. Don't be too low, otherwise
-        // normal follower synchronization will also be affected
         conf.set(ConfigOptions.LOG_REPLICA_MAX_LAG_TIME, Duration.ofSeconds(5));
         return conf;
     }
